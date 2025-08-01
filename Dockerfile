@@ -1,23 +1,35 @@
-FROM python:3.11-slim
+# Build stage
+FROM alpine:3.19 as builder
 
-# Metadata labels
-LABEL org.opencontainers.image.source="https://github.com/scharf/node-proxy-bridge"
-LABEL org.opencontainers.image.documentation="https://github.com/scharf/node-proxy-bridge#readme"
-LABEL org.opencontainers.image.description="Work around Node.js 20.12+ fetch() not respecting HTTP_PROXY env vars"
-LABEL org.opencontainers.image.licenses="MIT"
+RUN apk add --no-cache python3 py3-pip gcc musl-dev python3-dev
+
+WORKDIR /app
+COPY requirements.txt .
+
+# Install packages to a specific directory
+RUN pip3 install --no-cache-dir --break-system-packages \
+    --target=/app/packages \
+    -r requirements.txt
+
+# Runtime stage - fresh Alpine with no pip/setuptools
+FROM alpine:3.19
+
+RUN apk add --no-cache python3 && \
+    rm -rf /usr/lib/python*/site-packages/*
 
 WORKDIR /app
 
-# Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the application files
+# Copy only the installed packages, not pip/setuptools
+COPY --from=builder /app/packages /usr/lib/python3.11/site-packages/
 COPY node_proxy_bridge.py .
 COPY README.md .
 
-# Expose the proxy port
+# Create non-root user
+RUN adduser -D -u 1000 appuser
+USER appuser
+
+ENV PYTHONPATH=/usr/lib/python3.11/site-packages
+
 EXPOSE 8666
 
-# Run the proxy server
-CMD ["uvicorn", "node_proxy_bridge:app", "--host", "0.0.0.0", "--port", "8666"]
+CMD ["python3", "-m", "uvicorn", "node_proxy_bridge:app", "--host", "0.0.0.0", "--port", "8666"]

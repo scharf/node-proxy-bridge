@@ -5,7 +5,7 @@
 if [ -z "$1" ]; then
     echo "Error: Version not provided"
     echo "Usage: ./deploy.sh VERSION"
-    echo "Example: ./deploy.sh 1.0"
+    echo "Example: ./deploy.sh 1.0.1"
     exit 1
 fi
 
@@ -15,8 +15,8 @@ VERSION=$1
 echo "Deploy version ${VERSION}?"
 echo "This will:"
 echo "  - Create git tag v${VERSION}"
-echo "  - Build Docker image ${VERSION} and latest"
-echo "  - Push Docker image to Docker Hub"
+echo "  - Build multi-platform Docker images (amd64 & arm64)"
+echo "  - Push Docker images to Docker Hub"
 echo ""
 read -p "Continue? (y/N) " -n 1 -r
 echo ""
@@ -26,17 +26,45 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
-# Deploy
+# Check if docker buildx is available
+if ! docker buildx version > /dev/null 2>&1; then
+    echo "Error: docker buildx is required for multi-platform builds"
+    echo "Please update Docker Desktop or install buildx"
+    exit 1
+fi
+
+# Create git tag
 echo "Creating git tag..."
-git tag "v${VERSION}"
-git push origin "v${VERSION}"
+if ! git tag "v${VERSION}"; then
+    echo "Error: Failed to create git tag. Does v${VERSION} already exist?"
+    exit 1
+fi
 
-echo "Building Docker image..."
-docker build -t scharf/node-proxy-bridge:${VERSION} .
-docker tag scharf/node-proxy-bridge:${VERSION} scharf/node-proxy-bridge:latest
+if ! git push origin "v${VERSION}"; then
+    echo "Error: Failed to push git tag"
+    exit 1
+fi
 
-echo "Pushing to Docker Hub..."
-docker push scharf/node-proxy-bridge:${VERSION}
-docker push scharf/node-proxy-bridge:latest
+# Setup buildx if needed
+echo "Setting up Docker buildx..."
+docker buildx create --name mybuilder --use 2>/dev/null || docker buildx use mybuilder
 
-echo "Done: version ${VERSION} deployed"
+# Build and push multi-platform image
+echo "Building multi-platform Docker images..."
+if ! docker buildx build \
+    --platform linux/amd64,linux/arm64 \
+    -t scharf/node-proxy-bridge:${VERSION} \
+    -t scharf/node-proxy-bridge:latest \
+    --push \
+    .; then
+    echo "Error: Docker build failed"
+    exit 1
+fi
+
+echo "✓ Successfully deployed version ${VERSION}"
+echo ""
+echo "Images available at:"
+echo "  - scharf/node-proxy-bridge:${VERSION}"
+echo "  - scharf/node-proxy-bridge:latest"
+echo ""
+echo "Platforms: linux/amd64, linux/arm64"
