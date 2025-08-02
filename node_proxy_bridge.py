@@ -75,7 +75,8 @@ else:
 logger.info("")
 logger.info("=" * 80)
 
-app = FastAPI()
+app = FastAPI(title="Node Proxy Bridge",
+         description="A proxy server to work around Node.js 20.12+ fetch() not respecting HTTP_PROXY environment variables")
 
 # Note: FastAPI uses Starlette which has no built-in request size limit
 # ASGI servers (uvicorn) may have their own limits that need to be configured
@@ -142,7 +143,7 @@ client = httpx.AsyncClient(
     trust_env=True,  # uses HTTPS_PROXY from env
     verify=ssl_verify,  # Configurable SSL verification
     follow_redirects=True,
-    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+    limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
 )
 
 
@@ -157,6 +158,27 @@ def redact_sensitive_headers(headers: dict) -> dict:
 
     return redacted_headers
 
+
+# Add explicit error handler for proxy errors
+@app.exception_handler(httpx.HTTPError)
+async def handle_proxy_error(request: Request, exc: httpx.HTTPError):
+    error_id = f"error-{int(asyncio.get_event_loop().time() * 1000)}"
+    logger.error(f"[{error_id}] Proxy Error: {str(exc)}", exc_info=True)
+    return Response(
+        content=f"Proxy encountered an error: {str(exc)}",
+        status_code=502,
+        headers={"X-Error-ID": error_id}
+    )
+
+@app.exception_handler(Exception)
+async def handle_general_error(request: Request, exc: Exception):
+    error_id = f"error-{int(asyncio.get_event_loop().time() * 1000)}"
+    logger.error(f"[{error_id}] Unexpected Error: {str(exc)}", exc_info=True)
+    return Response(
+        content=f"Internal server error: {str(exc)}",
+        status_code=500,
+        headers={"X-Error-ID": error_id}
+    )
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy(full_path: str, request: Request):
@@ -185,7 +207,7 @@ async def proxy(full_path: str, request: Request):
         target_url += f"?{request.url.query}"
 
     logger.info(
-        f"[{request_id}] Smart proxy routing: {proxy_options} -> {target_url}"
+        f"[{request_id}] Proxy request: {request.method} {request.url.path} -> {target_url}"
     )
 
     # Copy headers

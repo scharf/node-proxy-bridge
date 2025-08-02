@@ -22,6 +22,12 @@ await fetch('http://localhost:8666/api.github.com/user');
 // ✅ Works! Routes through corporate proxy automatically
 ```
 
+## Important: Designed for Internal Use Only
+
+**This proxy is designed for internal usage within Docker Compose networks. It is not intended to be exposed publicly.**
+
+HTTPS support and authentication are intentionally omitted due to the intended internal-only use case. The proxy is meant to be deployed within a controlled environment where network access is already restricted.
+
 ## Quick Start
 
 ```bash
@@ -32,7 +38,7 @@ docker run -d -p 8666:8666 \
 
 That's it! Now just prefix your URLs with `http://localhost:8666/`
 
-## Docker Compose Example
+## Docker Compose Example (Internal Network Only)
 
 ```yaml
 version: '3.8'
@@ -40,8 +46,7 @@ version: '3.8'
 services:
   node-proxy-bridge:
     image: scharf/node-proxy-bridge
-    ports:
-      - "8666:8666"
+    # No ports exposed to host - only accessible within internal network
     environment:
       # Required proxy settings for corporate networks
       - HTTPS_PROXY=http://corp-proxy:3128
@@ -52,13 +57,30 @@ services:
       # - PROXY_CA_BUNDLE=/path/to/ca-bundle.crt  # Path to custom CA bundle if needed
       # - LOG_LEVEL=INFO  # Set to DEBUG for more verbose logging
     restart: unless-stopped
+    networks:
+      - internal-net
 
-  your-app:
-    image: your-app
+  service1:
+    image: your-service1
     environment:
       - API_BASE_URL=http://node-proxy-bridge:8666/api.example.com
     depends_on:
       - node-proxy-bridge
+    networks:
+      - internal-net
+
+  service2:
+    image: your-service2
+    environment:
+      - API_BASE_URL=http://node-proxy-bridge:8666/api.example.com
+    depends_on:
+      - node-proxy-bridge
+    networks:
+      - internal-net
+
+networks:
+  internal-net:
+    internal: true  # This makes the network inaccessible from outside Docker
 ```
 
 ### Using the proxy in your Node.js application
@@ -99,13 +121,29 @@ http://localhost:8666/proxy-no-streaming/api.example.com/endpoint
 | `PROXY_CA_BUNDLE` | Path to CA bundle | - |
 | `LOG_LEVEL` | Logging verbosity | `INFO` |
 
-## Security Note
+## Security & Limitations
 
+### Internal Use Only
+This proxy is designed exclusively for internal usage within Docker Compose networks or other controlled environments. It should never be exposed to the public internet or untrusted networks.
+
+### Intentional Limitations
+The following features are intentionally omitted due to the internal-only design:
+
+- **No Authentication**: The proxy does not implement authentication mechanisms.
+- **No HTTPS**: The proxy operates over HTTP only.
+- **No Rate Limiting**: There are no built-in protections against excessive requests.
+
+### SSL Verification
 SSL verification is disabled by default to work with corporate proxies that do SSL inspection. For production use outside corporate networks:
 
 ```bash
 docker run -d -p 8666:8666 -e PROXY_VERIFY_SSL=true scharf/node-proxy-bridge
 ```
+
+### Best Practices
+- Always use the internal network configuration shown in the Docker Compose example.
+- Never expose the proxy port (8666) to external networks.
+- Consider implementing network-level access controls if deploying in more complex environments.
 
 ## Related Issues
 
