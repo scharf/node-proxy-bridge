@@ -22,6 +22,25 @@ await fetch('http://localhost:8666/api.github.com/user');
 // ✅ Works! Routes through corporate proxy automatically
 ```
 
+## Design Philosophy: True Transparency
+
+This proxy is designed to be **completely transparent**:
+
+- **No timeouts**: The proxy imposes no time limits. Your application controls all timeouts.
+- **No error modification**: HTTP errors pass through exactly as received from the upstream server.
+- **No response tampering**: Headers, status codes, and bodies are preserved without modification.
+- **No buffering delays**: Streaming responses flow through immediately.
+
+### Why No Timeouts?
+
+Many applications have long-running requests (file uploads, streaming responses, long computations). A proxy shouldn't make assumptions about appropriate timeouts - that's the client's decision. The proxy acts as a pure passthrough, letting your application handle timing as needed.
+
+### Error Handling
+
+- **HTTP errors (4xx, 5xx)**: Passed through unchanged with original status, headers, and body
+- **Connection errors**: Return standard proxy status codes (502 Bad Gateway, 504 Gateway Timeout)
+- **DNS failures**: Return 502 with the original error message (e.g., "Name does not resolve")
+
 ## Important: Designed for Internal Use Only
 
 **This proxy is designed for internal usage within Docker Compose networks. It is not intended to be exposed publicly.**
@@ -33,10 +52,17 @@ HTTPS support and authentication are intentionally omitted due to the intended i
 ```bash
 docker run -d -p 8666:8666 \
   -e HTTPS_PROXY=http://corp-proxy:3128 \
-  scharf/node-proxy-bridge
+  scharf/node-proxy-bridge:1.1.0
 ```
 
 That's it! Now just prefix your URLs with `http://localhost:8666/`
+
+### What You Get
+
+✅ **Full transparency** - No timeouts, no modified errors, no altered responses  
+✅ **Corporate proxy support** - Routes through your configured HTTP_PROXY  
+✅ **Streaming support** - Real-time data flows through unchanged  
+✅ **Simple integration** - Just change your base URL
 
 ## Docker Compose Example (Internal Network Only)
 

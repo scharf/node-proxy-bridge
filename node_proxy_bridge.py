@@ -1,16 +1,12 @@
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import StreamingResponse
-import httpx
 import asyncio
+import httpx
 import json
 import logging
-from httpx import StreamClosed
-from urllib.parse import urlparse
-
 import os
-import logging
-import json
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import StreamingResponse
+from httpx import StreamClosed, ConnectError, TimeoutException
+from urllib.parse import urlparse
 
 # Set up logging
 log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -75,8 +71,10 @@ else:
 logger.info("")
 logger.info("=" * 80)
 
-app = FastAPI(title="Node Proxy Bridge",
-         description="A proxy server to work around Node.js 20.12+ fetch() not respecting HTTP_PROXY environment variables")
+app = FastAPI(
+    title="Node Proxy Bridge",
+    description="A proxy server to work around Node.js 20.12+ fetch() not respecting HTTP_PROXY environment variables",
+)
 
 # Note: FastAPI uses Starlette which has no built-in request size limit
 # ASGI servers (uvicorn) may have their own limits that need to be configured
@@ -139,11 +137,15 @@ def should_stream_from_options(proxy_options: list, body_json: dict) -> bool:
     return stream_from_body
 
 
+# Default client with no timeouts
 client = httpx.AsyncClient(
     trust_env=True,  # uses HTTPS_PROXY from env
     verify=ssl_verify,  # Configurable SSL verification
     follow_redirects=True,
     limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
+    timeout=httpx.Timeout(
+        connect=None, read=None, write=None, pool=None  # No timeout by default
+    ),
 )
 
 
@@ -158,27 +160,6 @@ def redact_sensitive_headers(headers: dict) -> dict:
 
     return redacted_headers
 
-
-# Add explicit error handler for proxy errors
-@app.exception_handler(httpx.HTTPError)
-async def handle_proxy_error(request: Request, exc: httpx.HTTPError):
-    error_id = f"error-{int(asyncio.get_event_loop().time() * 1000)}"
-    logger.error(f"[{error_id}] Proxy Error: {str(exc)}", exc_info=True)
-    return Response(
-        content=f"Proxy encountered an error: {str(exc)}",
-        status_code=502,
-        headers={"X-Error-ID": error_id}
-    )
-
-@app.exception_handler(Exception)
-async def handle_general_error(request: Request, exc: Exception):
-    error_id = f"error-{int(asyncio.get_event_loop().time() * 1000)}"
-    logger.error(f"[{error_id}] Unexpected Error: {str(exc)}", exc_info=True)
-    return Response(
-        content=f"Internal server error: {str(exc)}",
-        status_code=500,
-        headers={"X-Error-ID": error_id}
-    )
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy(full_path: str, request: Request):
@@ -296,35 +277,55 @@ async def proxy(full_path: str, request: Request):
                     logger.warning(
                         f"[{request_id}] Stream closed by upstream after {stream_duration:.2f}s"
                     )
+                    # Just stop streaming naturally
+                    return
+
+                except httpx.HTTPStatusError as e:
+                    stream_duration = (
+                        asyncio.get_event_loop().time() - stream_start_time
+                    )
+                    logger.error(
+                        f"[{request_id}] HTTP status error in stream after {stream_duration:.2f}s: {str(e)}",
+                        exc_info=True,
+                    )
+                    # For streaming, we can't return a proper error response
+                    # Just stop the stream
+                    return
+
+                except httpx.RequestError as e:
+                    stream_duration = (
+                        asyncio.get_event_loop().time() - stream_start_time
+                    )
+                    logger.error(
+                        f"[{request_id}] Request error in stream after {stream_duration:.2f}s: {str(e)}",
+                        exc_info=True,
+                    )
+                    # Just stop the stream
+                    return
 
                 except Exception as e:
                     stream_duration = (
                         asyncio.get_event_loop().time() - stream_start_time
                     )
                     logger.error(
-                        f"[{request_id}] Streaming error after {stream_duration:.2f}s: {str(e)}",
+                        f"[{request_id}] Unexpected streaming error after {stream_duration:.2f}s: {str(e)}",
                         exc_info=True,
                     )
-                    # Send error as SSE format
-                    error_chunk = f"data: {json.dumps({'error': str(e)})}\n\n"
-                    yield error_chunk.encode()
+                    # Just stop the stream
+                    return
 
             return StreamingResponse(
                 stream_response(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Headers": "*",
+                    "X-Accel-Buffering": "no",  # Disable buffering in nginx
                 },
             )
 
         # For non-streaming requests, use regular response
         else:
-            logger.debug(
-                f"[{request_id}] Making non-streaming request"
-            )
+            logger.debug(f"[{request_id}] Making non-streaming request")
 
             request_start_time = asyncio.get_event_loop().time()
             resp = await client.request(
@@ -341,16 +342,17 @@ async def proxy(full_path: str, request: Request):
             )
             logger.debug(f"[{request_id}] Response headers: {dict(resp.headers)}")
 
-            # Filter problematic headers
+            # Filter headers that would conflict with FastAPI's response handling
+            # These headers are managed by the framework and passing them through can cause issues
             filtered_headers = {
                 k: v
                 for k, v in resp.headers.items()
                 if k.lower()
                 not in [
-                    "content-encoding",
-                    "transfer-encoding",
-                    "content-length",
-                    "connection",
+                    "content-encoding",  # FastAPI handles encoding
+                    "transfer-encoding",  # FastAPI handles chunked responses
+                    "content-length",  # FastAPI calculates this
+                    "connection",  # FastAPI manages connections
                 ]
             }
 
@@ -361,13 +363,43 @@ async def proxy(full_path: str, request: Request):
                 media_type=resp.headers.get("content-type"),
             )
 
-    except httpx.HTTPError as e:
+    except httpx.HTTPStatusError as e:
+        # This is an actual HTTP error response (4xx, 5xx)
         request_duration = asyncio.get_event_loop().time() - start_time
         logger.error(
-            f"[{request_id}] Proxy error after {request_duration:.2f}s: {str(e)}",
+            f"[{request_id}] HTTP status error after {request_duration:.2f}s: {str(e)}",
             exc_info=True,
         )
-        return Response(content=f"Proxy error: {str(e)}", status_code=502)
+        # Pass through the exact status code and response
+        return Response(
+            content=e.response.content,
+            status_code=e.response.status_code,
+            headers=dict(e.response.headers),
+            media_type=e.response.headers.get("content-type"),
+        )
+
+    except httpx.TimeoutException as e:
+        request_duration = asyncio.get_event_loop().time() - start_time
+        logger.error(
+            f"[{request_id}] Timeout after {request_duration:.2f}s: {str(e)}",
+            exc_info=True,
+        )
+        # Standard Gateway Timeout
+        return Response(
+            content=str(e), status_code=504, headers={"Content-Type": "text/plain"}
+        )
+
+    except httpx.RequestError as e:
+        # This catches all request errors including ConnectError, etc.
+        request_duration = asyncio.get_event_loop().time() - start_time
+        logger.error(
+            f"[{request_id}] Request error after {request_duration:.2f}s: {str(e)}",
+            exc_info=True,
+        )
+        # For any request error, return 502 Bad Gateway with the original error message
+        return Response(
+            content=str(e), status_code=502, headers={"Content-Type": "text/plain"}
+        )
 
     except Exception as e:
         request_duration = asyncio.get_event_loop().time() - start_time
@@ -375,7 +407,10 @@ async def proxy(full_path: str, request: Request):
             f"[{request_id}] Unexpected error after {request_duration:.2f}s: {str(e)}",
             exc_info=True,
         )
-        return Response(content=f"Internal error: {str(e)}", status_code=500)
+        # For truly unexpected errors, return 500
+        return Response(
+            content=str(e), status_code=500, headers={"Content-Type": "text/plain"}
+        )
 
 
 @app.on_event("shutdown")
@@ -385,4 +420,5 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8666)
