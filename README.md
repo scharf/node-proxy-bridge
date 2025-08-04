@@ -2,6 +2,9 @@
 
 Work around Node.js 20.12+ fetch() not respecting HTTP_PROXY environment variables.
 
+Github: [scharf/node-proxy-bridge](https://github.com/scharf/node-proxy-bridge)<br>
+Docker: [scharf/node-proxy-bridge](https://hub.docker.com/r/scharf/node-proxy-bridge)
+
 ## Why Another Proxy?
 
 ### The Problem
